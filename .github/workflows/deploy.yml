@@ -1,0 +1,350 @@
+
+name: URL Shortener Blue-Green Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_color:
+        description: "Color to deploy (must be inactive)"
+        required: true
+        type: choice
+        options:
+          - blue
+          - green
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: url-shortener-blue-green-deployment
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: rg-urlshortener-bg
+  LB_NAME: lb-urlshortener-bg
+  LB_RULE: active-http-rule
+  IMAGE_NAME: url-shortener-blue-green
+  POSTGRES_SERVER: urlshortener-bg-demo-psql
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies and compile
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m compileall -q app
+
+      - name: Build image
+        run: docker build -t "${IMAGE_NAME}:${GITHUB_SHA}" .
+
+      - name: Container health test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run -d --name urlshortener-test \
+            -p 8000:8000 \
+            -e APP_VERSION=ci-test \
+            -e APP_COLOR=test \
+            "${IMAGE_NAME}:${GITHUB_SHA}"
+
+          for i in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              docker rm -f urlshortener-test
+              exit 0
+            fi
+            sleep 3
+          done
+
+          docker logs urlshortener-test
+          docker rm -f urlshortener-test || true
+          exit 1
+
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set image name
+        id: meta
+        shell: bash
+        run: |
+          echo "image=${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Push image
+        shell: bash
+        run: |
+          docker tag "${IMAGE_NAME}:${GITHUB_SHA}" "${{ steps.meta.outputs.image }}"
+          docker push "${{ steps.meta.outputs.image }}"
+
+  deploy:
+    needs: build-test-push
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Discover current traffic and validate target
+        id: traffic
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target_color }}
+        run: |
+          set -euo pipefail
+
+          RULE_JSON=$(az network lb rule show \
+            --resource-group "$RESOURCE_GROUP" \
+            --lb-name "$LB_NAME" \
+            --name "$LB_RULE" \
+            --output json)
+
+          CURRENT_POOL_ID=$(echo "$RULE_JSON" | jq -r '.backendAddressPool.id // empty')
+          CURRENT_COLOR=$(echo "$CURRENT_POOL_ID" | grep -oE 'pool-(blue|green)$' | sed 's/pool-//' || true)
+
+          if [[ -z "$CURRENT_COLOR" ]]; then
+            echo "Cannot determine active backend pool. Stopping."
+            exit 1
+          fi
+
+          if [[ "$TARGET" == "$CURRENT_COLOR" ]]; then
+            echo "Target is already active. Choose the inactive color."
+            exit 1
+          fi
+
+          echo "previous_color=$CURRENT_COLOR" >> "$GITHUB_OUTPUT"
+          echo "target_color=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Store database connection string in Key Vault
+        shell: bash
+        env:
+          POSTGRES_ADMIN: ${{ secrets.POSTGRES_ADMIN }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          : "${POSTGRES_ADMIN:?Missing GitHub secret POSTGRES_ADMIN}"
+          : "${POSTGRES_PASSWORD:?Missing GitHub secret POSTGRES_PASSWORD}"
+
+          KV_NAME=$(az keyvault list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, 'kvusbg-')].name | [0]" \
+            --output tsv)
+
+          if [[ -z "$KV_NAME" || "$KV_NAME" == "None" ]]; then
+            echo "Key Vault not found in resource group."
+            exit 1
+          fi
+
+          DB_HOST=$(az postgres flexible-server show \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$POSTGRES_SERVER" \
+            --query fullyQualifiedDomainName \
+            --output tsv)
+
+          export DB_HOST
+
+          DATABASE_URL=$(python3 -c \
+            'import os,urllib.parse; print("postgresql+psycopg://" + urllib.parse.quote(os.environ["POSTGRES_ADMIN"], safe="") + ":" + urllib.parse.quote(os.environ["POSTGRES_PASSWORD"], safe="") + "@" + os.environ["DB_HOST"] + ":5432/urlshortener?sslmode=require")')
+
+          echo "::add-mask::$DATABASE_URL"
+
+          az keyvault secret set \
+            --vault-name "$KV_NAME" \
+            --name DATABASE_URL \
+            --value "$DATABASE_URL" \
+            --output none
+
+          echo "Database connection string stored in Key Vault."
+
+      - name: Deploy to inactive VM
+        env:
+          TARGET: ${{ steps.traffic.outputs.target_color }}
+          IMAGE: ${{ needs.build-test-push.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KV_NAME=$(az keyvault list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, 'kvusbg-')].name | [0]" \
+            --output tsv)
+
+          case "$TARGET" in
+            blue)
+              VM_NAME="vm-urlshortener-blue"
+              CONTAINER_NAME="urlshortener-blue"
+              APP_COLOR="blue"
+              ;;
+            green)
+              VM_NAME="vm-urlshortener-green"
+              CONTAINER_NAME="urlshortener-green"
+              APP_COLOR="green"
+              ;;
+            *)
+              echo "Invalid target color"
+              exit 1
+              ;;
+          esac
+
+          # Pass non-secret values as environment variables to the remote script.
+          REMOTE_SCRIPT=$(cat <<REMOTE
+          set -eu
+
+          KV_NAME='$KV_NAME'
+          IMAGE='$IMAGE'
+          CONTAINER_NAME='$CONTAINER_NAME'
+          APP_COLOR='$APP_COLOR'
+          APP_VERSION='$GITHUB_SHA'
+
+          TOKEN_JSON=\$(curl -fsS \
+            -H Metadata:true \
+            'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net')
+
+          TOKEN=\$(printf '%s' "\$TOKEN_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+          SECRET_JSON=\$(curl -fsS \
+            -H "Authorization: Bearer \$TOKEN" \
+            "https://\$KV_NAME.vault.azure.net/secrets/DATABASE_URL?api-version=7.4")
+
+          DATABASE_URL=\$(printf '%s' "\$SECRET_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+
+          docker pull "\$IMAGE"
+          docker rm -f "\$CONTAINER_NAME" || true
+
+          docker run -d \
+            --name "\$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p 80:8000 \
+            -e DATABASE_URL="\$DATABASE_URL" \
+            -e APP_VERSION="\$APP_VERSION" \
+            -e APP_COLOR="\$APP_COLOR" \
+            "\$IMAGE"
+
+          unset DATABASE_URL SECRET_JSON TOKEN TOKEN_JSON
+
+          for i in \$(seq 1 20); do
+            BODY=\$(curl --fail --silent http://127.0.0.1/health || true)
+            if printf '%s' "\$BODY" | grep -q '"status":"healthy"' &&
+              printf '%s' "\$BODY" | grep -q "\\"color\\":\\"$APP_COLOR\\""; then
+              echo "DEPLOY_HEALTH_OK"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          docker logs "\$CONTAINER_NAME"
+          exit 1
+          REMOTE
+          )
+
+                  RUN_RESULT=$(az vm run-command invoke \
+          --resource-group "$RESOURCE_GROUP" \
+          --name "$VM_NAME" \
+          --command-id RunShellScript \
+          --scripts "$REMOTE_SCRIPT" \
+          --output json)
+
+        if ! printf '%s' "$RUN_RESULT" |
+            jq -e '.. | strings | select(contains("DEPLOY_HEALTH_OK"))' \
+            >/dev/null; then
+          echo "VM deployment or local health check failed. Traffic was not switched."
+          exit 1
+        fi
+
+        echo "VM deployment and local health check succeeded."
+      - name: Switch Load Balancer to target
+        env:
+          TARGET: ${{ steps.traffic.outputs.target_color }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az network lb rule update \
+            --resource-group "$RESOURCE_GROUP" \
+            --lb-name "$LB_NAME" \
+            --name "$LB_RULE" \
+            --backend-pool-name "pool-$TARGET" \
+            --output none
+
+      - name: Verify public endpoint
+        id: verify
+        continue-on-error: true
+        shell: bash
+        env:
+          TARGET: ${{ steps.traffic.outputs.target_color }}
+        run: |
+          set -euo pipefail
+
+          PUBLIC_IP=$(az network public-ip show \
+            --resource-group "$RESOURCE_GROUP" \
+            --name pip-urlshortener-bg \
+            --query ipAddress \
+            --output tsv)
+
+          for i in {1..20}; do
+            BODY=$(curl --fail --silent --show-error \
+              --max-time 5 "http://${PUBLIC_IP}/health" 2>/dev/null || true)
+
+            echo "Attempt $i: $BODY"
+
+            if printf '%s' "$BODY" | grep -q '"status":"healthy"' &&
+               printf '%s' "$BODY" | grep -q "\"color\":\"$TARGET\""; then
+              exit 0
+            fi
+
+            sleep 6
+          done
+
+          echo "Public health check failed for $TARGET."
+          exit 1
+
+      - name: Roll back traffic if verification fails
+        if: steps.verify.outcome == 'failure'
+        env:
+          PREVIOUS: ${{ steps.traffic.outputs.previous_color }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Health check failed. Restoring previous backend."
+
+          az network lb rule update \
+            --resource-group "$RESOURCE_GROUP" \
+            --lb-name "$LB_NAME" \
+            --name "$LB_RULE" \
+            --backend-pool-name "pool-$PREVIOUS" \
+            --output none
+
+          exit 1
+
+      - name: Deployment summary
+        if: success()
+        env:
+          TARGET: ${{ steps.traffic.outputs.target_color }}
+          IMAGE: ${{ needs.build-test-push.outputs.image }}
+        shell: bash
+        run: |
+          echo "Deployment and public health check succeeded."
+          echo "Active color: $TARGET"
+          echo "Image: $IMAGE"

@@ -31,3 +31,8 @@ override.tf.json
 *.key
 .DS_Store
 Thumbs.db
+
+github-oidc-credential.json
+terraform.tfplan
+*.tfplan
+tfplan
