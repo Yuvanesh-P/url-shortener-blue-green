@@ -1,0 +1,11 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LinkLite · v1</title><link rel="stylesheet" href="/static/site-blue.css"></head>
+<body><main class="shell"><nav><span class="brand">🔗 LinkLite</span><span class="pill">BLUE · v1.0.0</span></nav>
+<section class="hero"><p class="eyebrow">SIMPLE LINKS. ZERO FUSS.</p><h1>Make long links<br><span>short & sweet.</span></h1>
+<p class="sub">Turn a long URL into a clean, shareable link in seconds.</p>
+<form id="shorten"><label for="url">Destination URL</label><div class="input-row"><input id="url" type="url" placeholder="https://example.com/your/very/long/link" required><button>Shorten URL ↗</button></div></form>
+<div id="result" class="result" hidden></div><div class="features"><article><b>⚡ Fast</b><p>Short links in seconds</p></article><article><b>📊 Basic stats</b><p>Track total clicks</p></article><article><b>🛡️ Reliable</b><p>Health-checked service</p></article></div>
+<footer>API v1.0.0 · <a href="/docs">Explore API docs →</a></footer></section></main>
+<script>
+document.querySelector('#shorten').addEventListener('submit',async e=>{e.preventDefault();const r=document.querySelector('#result');r.hidden=false;r.textContent='Creating your link…';try{const x=await fetch('/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:document.querySelector('#url').value})});const d=await x.json();if(!x.ok)throw Error(d.detail||'Request failed');r.innerHTML='Your short link: <a target="_blank" rel="noreferrer"></a>';r.querySelector('a').href=d.short_url;r.querySelector('a').textContent=d.short_url;}catch(err){r.textContent=err.message;}});
+</script></body></html>

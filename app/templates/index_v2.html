@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LinkFlow · v2</title><link rel="stylesheet" href="/static/site-green.css"></head>
+<body><main class="shell"><nav><span class="brand">✳ LinkFlow</span><span class="pill">GREEN · v2.0.0</span></nav>
+<section class="hero"><p class="eyebrow">YOUR LINKS, WITH INSIGHT</p><h1>More than a link.<br><span>A smarter journey.</span></h1>
+<p class="sub">Create smart short links and explore performance analytics from one place.</p>
+<form id="shorten"><label for="url">Paste your destination</label><div class="input-row"><input id="url" type="url" placeholder="https://your-site.com/campaign" required><button>Create smart link ↗</button></div></form>
+<div id="result" class="result" hidden></div><div class="features"><article><b>✦ Smart links</b><p>Clean, shareable URLs</p></article><article><b>◷ Live click count</b><p>Check link performance</p></article><article><b>⌁ Link insights</b><p>Use the v2 analytics API</p></article></div>
+<div class="dashboard"><div><small>DEPLOYMENT</small><strong>GREEN / v2.0.0</strong></div><div><small>API DOCUMENTATION</small><a href="/docs">Open enhanced docs ↗</a></div></div>
+<footer>LinkFlow v2.0.0 · <a href="/docs">Explore API docs →</a></footer></section></main>
+<script>
+document.querySelector('#shorten').addEventListener('submit',async e=>{e.preventDefault();const r=document.querySelector('#result');r.hidden=false;r.textContent='Creating your smart link…';try{const x=await fetch('/shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:document.querySelector('#url').value})});const d=await x.json();if(!x.ok)throw Error(d.detail||'Request failed');r.innerHTML='Your smart link: <a target="_blank" rel="noreferrer"></a> <button type="button" class="copy">Copy</button>';r.querySelector('a').href=d.short_url;r.querySelector('a').textContent=d.short_url;r.querySelector('.copy').onclick=()=>navigator.clipboard.writeText(d.short_url);}catch(err){r.textContent=err.message;}});
+</script></body></html>

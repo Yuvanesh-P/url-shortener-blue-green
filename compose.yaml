@@ -1,0 +1,28 @@
+
+services:
+  blue:
+    build: .
+    container_name: urlshortener-blue
+    environment:
+      APP_VERSION: "1.0.0"
+      APP_COLOR: blue
+      DATABASE_URL: sqlite:////data/urlshortener.db
+    ports:
+      - "8001:8000"
+    volumes:
+      - url-data:/data
+
+  green:
+    build: .
+    container_name: urlshortener-green
+    environment:
+      APP_VERSION: "2.0.0"
+      APP_COLOR: green
+      DATABASE_URL: sqlite:////data/urlshortener.db
+    ports:
+      - "8002:8000"
+    volumes:
+      - url-data:/data
+
+volumes:
+  url-data:
