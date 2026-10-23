@@ -69,35 +69,6 @@ resource "azurerm_lb_rule" "active" {
     : [azurerm_lb_backend_address_pool.green.id]
   )
 
-  probe_id = azurerm_lb_probe.http.id
-}
-
-resource "azurerm_lb_outbound_rule" "blue_outbound" {
-  name                    = "outbound-blue"
-  loadbalancer_id         = azurerm_lb.bg.id
-  protocol                = "All"
-  backend_address_pool_id = azurerm_lb_backend_address_pool.blue.id
-
-  frontend_ip_configuration {
-    name = "public"
-  }
-
-  allocated_outbound_ports = 1024
-  idle_timeout_in_minutes  = 15
-  tcp_reset_enabled        = true
-}
-
-resource "azurerm_lb_outbound_rule" "green_outbound" {
-  name                    = "outbound-green"
-  loadbalancer_id         = azurerm_lb.bg.id
-  protocol                = "All"
-  backend_address_pool_id = azurerm_lb_backend_address_pool.green.id
-
-  frontend_ip_configuration {
-    name = "public"
-  }
-
-  allocated_outbound_ports = 1024
-  idle_timeout_in_minutes  = 15
-  tcp_reset_enabled        = true
+  probe_id             = azurerm_lb_probe.http.id
+  disable_outbound_snat = true
 }
