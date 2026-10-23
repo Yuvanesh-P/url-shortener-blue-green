@@ -265,7 +265,6 @@ jobs:
           exit 1
           REMOTE
           )
-
           RUN_RESULT=$(az vm run-command invoke \
             --resource-group "$RESOURCE_GROUP" \
             --name "$VM_NAME" \
